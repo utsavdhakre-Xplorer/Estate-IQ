@@ -170,7 +170,12 @@ def _startup_autotrain_if_needed() -> None:
     try:
         from model_training import train_v4_enterprise_engine
 
-        train_v4_enterprise_engine(seed=42)
+        low_memory = os.getenv("LOW_MEMORY", "").strip().lower() in {"1", "true", "yes", "on"}
+        # Render free tier is commonly 512MB; default to low-memory training there.
+        if os.getenv("RENDER"):
+            low_memory = True
+
+        train_v4_enterprise_engine(seed=42, low_memory=low_memory)
         _reload_core_artifacts()
         logger.warning("Auto-training complete. Ready=%s", bool(model) and bool(city_encoder) and bool(location_encoder) and bool(features_list))
     except Exception:

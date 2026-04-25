@@ -231,10 +231,94 @@ def compute_market_trends(df: pd.DataFrame) -> dict:
     return out
 
 
-def train_v4_enterprise_engine(seed: int = 42) -> None:
-    print("Training V4 Enterprise Engine (Synthetic Multi-City + StackingRegressor)...")
+def train_v4_enterprise_engine(seed: int = 42, low_memory: bool = False) -> None:
+    """
+    Train and persist artifacts used by the FastAPI backend.
 
-    df_combined, city_base_prices = generate_city_aware_synthetic_data(seed=seed)
+    low_memory=True is intended for small-memory hosts (e.g. 512MB) and will:
+    - reduce dataset size
+    - use smaller base models
+    - skip SHAP explainer
+    """
+    mode = "LOW-MEMORY" if low_memory else "STANDARD"
+    print(f"Training V4 Enterprise Engine ({mode})...")
+
+    # For constrained environments, reduce rows per city to keep RAM low.
+    if low_memory:
+        reduced_specs: List[CitySpec] = []
+        for spec in CITY_SPECS:
+            reduced_specs.append(
+                CitySpec(
+                    name=spec.name,
+                    base_price_per_sqft=spec.base_price_per_sqft,
+                    area_min=spec.area_min,
+                    area_max=spec.area_max,
+                    locations=spec.locations,
+                    rows=min(450, int(spec.rows)),
+                )
+            )
+        city_specs = reduced_specs
+    else:
+        city_specs = CITY_SPECS
+
+    # Inline generation to avoid copying a large df multiple times
+    rng = np.random.default_rng(seed)
+    city_base_prices: Dict[str, float] = {spec.name: float(spec.base_price_per_sqft) for spec in city_specs}
+    all_rows: List[pd.DataFrame] = []
+    for spec in city_specs:
+        n = spec.rows
+        area_sqft = rng.integers(spec.area_min, spec.area_max + 1, size=n).astype(float)
+        bhk = np.clip(np.round(area_sqft / rng.uniform(500, 750, size=n)), 1, 6).astype(int)
+        gym = rng.random(size=n) < 0.55
+        pool = rng.random(size=n) < 0.35
+        amenity_count = gym.astype(int) + pool.astype(int)
+        builder_grade = rng.integers(1, 6, size=n).astype(int)
+        proximity_score = rng.uniform(1, 10, size=n).astype(float)
+        month = rng.integers(1, 13, size=n).astype(int)
+        location = rng.choice(spec.locations, size=n, replace=True)
+
+        base_price = area_sqft * spec.base_price_per_sqft
+        loc_names = np.array(spec.locations, dtype=object)
+        loc_multiplier = rng.normal(loc=1.0, scale=0.07, size=len(loc_names))
+        loc_multiplier = np.clip(loc_multiplier, 0.80, 1.20)
+        loc_mult_map = dict(zip(loc_names, loc_multiplier))
+        loc_mult = np.vectorize(loc_mult_map.get, otypes=[float])(location)
+        location_premium = (loc_mult - 1.0) * base_price
+
+        builder_premium = (builder_grade - 1) * 0.08 * base_price
+        amenity_premium = amenity_count * 0.03 * base_price
+        proximity_premium = (proximity_score - 5.0) * 0.02 * base_price
+
+        seasonal_factor = np.ones(n, dtype=float)
+        seasonal_factor[np.isin(month, [10, 11, 12])] = 1.05
+        seasonal_factor[np.isin(month, [5, 6])] = 0.97
+
+        noise = rng.normal(loc=1.0, scale=0.04, size=n)
+        noise = np.clip(noise, 0.85, 1.20)
+        final_price = (base_price + location_premium + builder_premium + amenity_premium + proximity_premium) * seasonal_factor * noise
+
+        df_city = pd.DataFrame(
+            {
+                "city": spec.name,
+                "location": location.astype(str),
+                "sqrt": area_sqft,
+                "bhk": bhk,
+                "Gymnasium": gym.astype(int),
+                "Swimming Pool": pool.astype(int),
+                "amenity_count": amenity_count,
+                "builder_grade": builder_grade,
+                "proximity_score": proximity_score,
+                "month": month,
+                "price": final_price.astype(float),
+            }
+        )
+        all_rows.append(df_city)
+
+    df_combined = pd.concat(all_rows, ignore_index=True)
+    df_combined["bhk_density"] = df_combined["sqrt"] / df_combined["bhk"].replace(0, 1)
+    df_combined = df_combined[df_combined["sqrt"].between(200, 8000)]
+    df_combined = df_combined[df_combined["price"].between(500_000, 500_000_000)]
+    df_combined = df_combined.reset_index(drop=True)
 
     # Encoders
     le_city = LabelEncoder()
@@ -258,25 +342,26 @@ def train_v4_enterprise_engine(seed: int = 42) -> None:
     X_train = X_train_df.values
     X_test = X_test_df.values
 
+    # Keep training lightweight in low-memory mode.
     base_estimators = [
         (
             "rf",
             RandomForestRegressor(
-                n_estimators=200,
-                max_depth=12,
+                n_estimators=80 if low_memory else 200,
+                max_depth=10 if low_memory else 12,
                 min_samples_split=5,
                 min_samples_leaf=2,
                 max_features="sqrt",
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=1 if low_memory else -1,
             ),
         ),
         (
             "xgb",
             XGBRegressor(
-                n_estimators=300,
-                learning_rate=0.03,
-                max_depth=7,
+                n_estimators=120 if low_memory else 300,
+                learning_rate=0.05 if low_memory else 0.03,
+                max_depth=5 if low_memory else 7,
                 subsample=0.85,
                 colsample_bytree=0.85,
                 reg_alpha=0.1,
@@ -287,10 +372,10 @@ def train_v4_enterprise_engine(seed: int = 42) -> None:
         (
             "lgbm",
             LGBMRegressor(
-                n_estimators=300,
-                learning_rate=0.03,
-                max_depth=8,
-                num_leaves=63,
+                n_estimators=140 if low_memory else 300,
+                learning_rate=0.05 if low_memory else 0.03,
+                max_depth=6 if low_memory else 8,
+                num_leaves=31 if low_memory else 63,
                 subsample=0.85,
                 colsample_bytree=0.85,
                 reg_alpha=0.1,
@@ -306,9 +391,9 @@ def train_v4_enterprise_engine(seed: int = 42) -> None:
     ensemble_model = StackingRegressor(
         estimators=base_estimators,
         final_estimator=meta_learner,
-        cv=5,
+        cv=3 if low_memory else 5,
         passthrough=False,
-        n_jobs=-1,
+        n_jobs=1 if low_memory else -1,
     )
 
     print("Training stacking ensemble...")
@@ -381,19 +466,20 @@ def train_v4_enterprise_engine(seed: int = 42) -> None:
     market_trends = compute_market_trends(df_combined)
 
     # SHAP explainer (TreeExplainer on RF base estimator)
-    print("Computing SHAP explainer (RF TreeExplainer)...")
     shap_explainer = None
-    try:
-        import shap  # noqa: F401
+    if not low_memory:
+        print("Computing SHAP explainer (RF TreeExplainer)...")
+        try:
+            import shap  # noqa: F401
 
-        rf_fitted = ensemble_model.named_estimators_.get("rf")
-        if rf_fitted is None and hasattr(ensemble_model, "estimators_") and ensemble_model.estimators_:
-            rf_fitted = ensemble_model.estimators_[0]
+            rf_fitted = ensemble_model.named_estimators_.get("rf")
+            if rf_fitted is None and hasattr(ensemble_model, "estimators_") and ensemble_model.estimators_:
+                rf_fitted = ensemble_model.estimators_[0]
 
-        if rf_fitted is not None:
-            shap_explainer = shap.TreeExplainer(rf_fitted)
-    except Exception as e:
-        print(f"SHAP explainer could not be created: {e}")
+            if rf_fitted is not None:
+                shap_explainer = shap.TreeExplainer(rf_fitted)
+        except Exception as e:
+            print(f"SHAP explainer could not be created: {e}")
 
     # Persist artifacts
     print("Saving artifacts...")
