@@ -3,7 +3,9 @@ services:
     name: house-price-backend
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2
+    # Render free tier often has 512MB RAM. Use a single worker to avoid duplicating
+    # model loading / startup auto-training memory across processes.
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0

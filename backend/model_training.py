@@ -254,7 +254,7 @@ def train_v4_enterprise_engine(seed: int = 42, low_memory: bool = False) -> None
                     area_min=spec.area_min,
                     area_max=spec.area_max,
                     locations=spec.locations,
-                    rows=min(450, int(spec.rows)),
+                    rows=min(200, int(spec.rows)),
                 )
             )
         city_specs = reduced_specs
@@ -342,59 +342,73 @@ def train_v4_enterprise_engine(seed: int = 42, low_memory: bool = False) -> None
     X_train = X_train_df.values
     X_test = X_test_df.values
 
-    # Keep training lightweight in low-memory mode.
-    base_estimators = [
-        (
-            "rf",
-            RandomForestRegressor(
-                n_estimators=80 if low_memory else 200,
-                max_depth=10 if low_memory else 12,
-                min_samples_split=5,
-                min_samples_leaf=2,
-                max_features="sqrt",
-                random_state=42,
-                n_jobs=1 if low_memory else -1,
+    if low_memory:
+        # Extreme low-memory mode: single compact model (no XGBoost/LightGBM/stacking).
+        ensemble_model = RandomForestRegressor(
+            n_estimators=60,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            random_state=42,
+            n_jobs=1,
+        )
+        metrics_base_models = ["RandomForest(60)"]
+        metrics_meta = None
+    else:
+        base_estimators = [
+            (
+                "rf",
+                RandomForestRegressor(
+                    n_estimators=200,
+                    max_depth=12,
+                    min_samples_split=5,
+                    min_samples_leaf=2,
+                    max_features="sqrt",
+                    random_state=42,
+                    n_jobs=-1,
+                ),
             ),
-        ),
-        (
-            "xgb",
-            XGBRegressor(
-                n_estimators=120 if low_memory else 300,
-                learning_rate=0.05 if low_memory else 0.03,
-                max_depth=5 if low_memory else 7,
-                subsample=0.85,
-                colsample_bytree=0.85,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                random_state=42,
+            (
+                "xgb",
+                XGBRegressor(
+                    n_estimators=300,
+                    learning_rate=0.03,
+                    max_depth=7,
+                    subsample=0.85,
+                    colsample_bytree=0.85,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=42,
+                ),
             ),
-        ),
-        (
-            "lgbm",
-            LGBMRegressor(
-                n_estimators=140 if low_memory else 300,
-                learning_rate=0.05 if low_memory else 0.03,
-                max_depth=6 if low_memory else 8,
-                num_leaves=31 if low_memory else 63,
-                subsample=0.85,
-                colsample_bytree=0.85,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                random_state=42,
-                verbose=-1,
+            (
+                "lgbm",
+                LGBMRegressor(
+                    n_estimators=300,
+                    learning_rate=0.03,
+                    max_depth=8,
+                    num_leaves=63,
+                    subsample=0.85,
+                    colsample_bytree=0.85,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    verbose=-1,
+                ),
             ),
-        ),
-    ]
+        ]
 
-    meta_learner = Ridge(alpha=1.0)
-
-    ensemble_model = StackingRegressor(
-        estimators=base_estimators,
-        final_estimator=meta_learner,
-        cv=3 if low_memory else 5,
-        passthrough=False,
-        n_jobs=1 if low_memory else -1,
-    )
+        meta_learner = Ridge(alpha=1.0)
+        ensemble_model = StackingRegressor(
+            estimators=base_estimators,
+            final_estimator=meta_learner,
+            cv=5,
+            passthrough=False,
+            n_jobs=-1,
+        )
+        metrics_base_models = ["RandomForest(200)", "XGBoost(300)", "LightGBM(300)"]
+        metrics_meta = "Ridge(alpha=1.0)"
 
     print("Training stacking ensemble...")
     ensemble_model.fit(X_train, y_train)
@@ -430,19 +444,23 @@ def train_v4_enterprise_engine(seed: int = 42, low_memory: bool = False) -> None
         "train_samples": int(len(X_train_df)),
         "test_samples": int(len(X_test_df)),
         "trained_at": datetime.now().isoformat(),
-        "base_models": ["RandomForest(200)", "XGBoost(300)", "LightGBM(300)"],
-        "meta_learner": "Ridge(alpha=1.0)",
+        "base_models": metrics_base_models,
+        "meta_learner": metrics_meta,
         "engine": "v4_stacking_ensemble",
     }
 
     # Cross-validation (quick health signal)
-    try:
-        cv_r2 = cross_val_score(ensemble_model, X_train, y_train, cv=5, scoring="r2", n_jobs=-1)
-        metrics["cv_r2_mean"] = round(float(cv_r2.mean()), 4)
-        metrics["cv_r2_std"] = round(float(cv_r2.std(ddof=0)), 4)
-    except Exception:
+    if low_memory:
         metrics["cv_r2_mean"] = None
         metrics["cv_r2_std"] = None
+    else:
+        try:
+            cv_r2 = cross_val_score(ensemble_model, X_train, y_train, cv=5, scoring="r2", n_jobs=-1)
+            metrics["cv_r2_mean"] = round(float(cv_r2.mean()), 4)
+            metrics["cv_r2_std"] = round(float(cv_r2.std(ddof=0)), 4)
+        except Exception:
+            metrics["cv_r2_mean"] = None
+            metrics["cv_r2_std"] = None
 
     # Training stats (per-city) + percentiles for confidence adjustment
     training_stats = compute_training_stats(df_combined)

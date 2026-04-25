@@ -152,6 +152,33 @@ def _reload_core_artifacts() -> None:
     shap_explainer = load_resource("shap_explainer.joblib")
 
 
+def _acquire_startup_lock(name: str, timeout_s: float = 180.0) -> bool:
+    """
+    Simple cross-platform startup lock using exclusive file create.
+    Prevents multiple processes/threads from training simultaneously.
+    """
+    lock_path = os.path.join(tempfile.gettempdir(), name)
+    start = time.time()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            if (time.time() - start) > timeout_s:
+                return False
+            time.sleep(1.0)
+        except Exception:
+            return False
+
+
+def _release_startup_lock(name: str) -> None:
+    lock_path = os.path.join(tempfile.gettempdir(), name)
+    try:
+        os.remove(lock_path)
+    except Exception:
+        pass
+
 @app.on_event("startup")
 def _startup_autotrain_if_needed() -> None:
     """
@@ -167,6 +194,17 @@ def _startup_autotrain_if_needed() -> None:
         return
 
     logger.warning("Core artifacts not ready. AUTO_TRAIN_ON_STARTUP enabled; training model now...")
+    lock_name = "estateiq_autotrain.lock"
+    got_lock = _acquire_startup_lock(lock_name, timeout_s=240.0)
+    if not got_lock:
+        logger.warning("Auto-train lock busy; waiting for artifacts to appear...")
+        for _ in range(60):
+            time.sleep(2.0)
+            _reload_core_artifacts()
+            if bool(model) and bool(city_encoder) and bool(location_encoder) and bool(features_list):
+                return
+        return
+
     try:
         from model_training import train_v4_enterprise_engine
 
@@ -180,6 +218,8 @@ def _startup_autotrain_if_needed() -> None:
         logger.warning("Auto-training complete. Ready=%s", bool(model) and bool(city_encoder) and bool(location_encoder) and bool(features_list))
     except Exception:
         logger.exception("Auto-training failed; backend will remain degraded.")
+    finally:
+        _release_startup_lock(lock_name)
 
 
 @app.middleware("http")
