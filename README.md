@@ -8,7 +8,12 @@
 - **Machine Learning:** Scikit-Learn (Random Forest Regressor) 🤖
 - **Frontend:** React.js ⚛️, Chart.js 📊
 - **Styling:** CSS (Modern 3D/Glassmorphism design) 🎨
-- **Deployment:** Render (Cloud Deployment) ☁️
+## Deployment 🌐
+The project is configured for cloud deployment:
+- **Frontend (Vercel)**: Best for React. See [vercel.json](./frontend-cra/vercel.json).
+- **Backend (Render)**: Best for FastAPI. See [render.yaml](./backend/render.yaml).
+
+For detailed deployment steps, refer to the [Deployment Plan](./deployment_plan.md).
 
 ## Features
 - **Price Prediction:** Estimated market value based on Area, Bedrooms, Bathrooms, Age, and Location.

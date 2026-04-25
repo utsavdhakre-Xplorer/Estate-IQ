@@ -2,6 +2,14 @@ const webpack = require('webpack');
 const path = require('path');
 
 module.exports = {
+    style: {
+        postcss: {
+            plugins: [
+                require('tailwindcss'),
+                require('autoprefixer'),
+            ],
+        },
+    },
     webpack: {
         configure: (webpackConfig) => {
             // Fix for "fully specified" errors in ESM modules
