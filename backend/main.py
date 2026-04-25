@@ -16,9 +16,20 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+
+# Optional dependency: slowapi (rate limiting). Backend should still boot without it.
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
+
+    _SLOWAPI_AVAILABLE = True
+except Exception:  # pragma: no cover
+    Limiter = None  # type: ignore[assignment]
+    RateLimitExceeded = Exception  # type: ignore[assignment]
+    _rate_limit_exceeded_handler = None  # type: ignore[assignment]
+    get_remote_address = None  # type: ignore[assignment]
+    _SLOWAPI_AVAILABLE = False
 
 load_dotenv()
 
@@ -39,10 +50,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Rate limiting (if slowapi is installed)
+if _SLOWAPI_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+else:
+    class _NoopLimiter:
+        def limit(self, _rule: str):
+            def _decorator(fn):
+                return fn
+
+            return _decorator
+
+    limiter = _NoopLimiter()
 
 # Executor for CPU-bound prediction
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -108,6 +129,52 @@ location_price_index = load_resource("location_price_index.joblib") or {}
 city_base_prices = load_resource("city_base_prices.joblib") or {}
 market_trends = load_resource("market_trends.joblib") or {}
 shap_explainer = load_resource("shap_explainer.joblib")
+
+
+def _reload_core_artifacts() -> None:
+    global model, scaler, city_encoder, location_encoder, features_list, cities_list, locations_list
+    global model_metrics, training_profile, training_stats, location_price_index, city_base_prices, market_trends, shap_explainer
+
+    model = load_resource("model_final.joblib")
+    scaler = load_resource("scaler.joblib")
+    city_encoder = load_resource("city_encoder.joblib")
+    location_encoder = load_resource("location_encoder.joblib")
+    features_list = load_resource("features.joblib")
+    cities_list = load_resource("cities_list.joblib")
+    locations_list = load_resource("locations_list.joblib")
+
+    model_metrics = load_resource("model_metrics.joblib") or {}
+    training_profile = load_resource("training_profile.joblib") or {}
+    training_stats = load_resource("training_stats.joblib") or {}
+    location_price_index = load_resource("location_price_index.joblib") or {}
+    city_base_prices = load_resource("city_base_prices.joblib") or {}
+    market_trends = load_resource("market_trends.joblib") or {}
+    shap_explainer = load_resource("shap_explainer.joblib")
+
+
+@app.on_event("startup")
+def _startup_autotrain_if_needed() -> None:
+    """
+    Production safety: optionally auto-train if the model artifact failed to load.
+    Enable with AUTO_TRAIN_ON_STARTUP=1 (recommended for Render if artifacts aren't committed).
+    """
+    enabled = os.getenv("AUTO_TRAIN_ON_STARTUP", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return
+
+    core_ok = bool(model) and bool(city_encoder) and bool(location_encoder) and bool(features_list)
+    if core_ok:
+        return
+
+    logger.warning("Core artifacts not ready. AUTO_TRAIN_ON_STARTUP enabled; training model now...")
+    try:
+        from model_training import train_v4_enterprise_engine
+
+        train_v4_enterprise_engine(seed=42)
+        _reload_core_artifacts()
+        logger.warning("Auto-training complete. Ready=%s", bool(model) and bool(city_encoder) and bool(location_encoder) and bool(features_list))
+    except Exception:
+        logger.exception("Auto-training failed; backend will remain degraded.")
 
 
 @app.middleware("http")

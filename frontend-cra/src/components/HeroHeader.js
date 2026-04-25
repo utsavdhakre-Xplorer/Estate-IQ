@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { motion } from "framer-motion";
+import { API_BASE_URL } from "../utils/api";
 
 export default function HeroHeader({ modelReady }) {
   const particles = useMemo(() => {
@@ -70,7 +71,7 @@ export default function HeroHeader({ modelReady }) {
               {modelReady ? "Model Online" : "Model Not Ready"}
             </div>
             <div className="pill pillGold">
-              Backend: <span className="mono">:8000</span>
+              Backend: <span className="mono">{API_BASE_URL}</span>
             </div>
           </div>
         </div>

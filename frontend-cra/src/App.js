@@ -56,7 +56,11 @@ export default function App() {
       } catch (e) {
         if (!alive) return;
         setModelReady(false);
-        addToast("error", "Backend not reachable.", "Start the server on localhost:8000.");
+        addToast(
+          "error",
+          "Backend not reachable.",
+          "Configure REACT_APP_API_BASE_URL (Vercel env var) or start the server on localhost:8000."
+        );
       }
     })();
     return () => {
