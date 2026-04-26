@@ -69,6 +69,13 @@ else:
 _executor = ThreadPoolExecutor(max_workers=4)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ARTIFACT_DIR = os.getenv("ARTIFACT_DIR", BASE_DIR)
+try:
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+except Exception:
+    # If the configured directory is not writable/creatable, fall back to /tmp.
+    ARTIFACT_DIR = os.path.join(tempfile.gettempdir(), "estateiq_artifacts")
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 # Cache (portable across Windows/Linux)
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "joblib_cache_house_price")
@@ -79,7 +86,7 @@ _prediction_counter: Dict[str, Any] = {"total": 0, "by_city": {}, "by_month": {}
 
 
 def _artifact_path(filename: str) -> str:
-    return os.path.join(BASE_DIR, filename)
+    return os.path.join(ARTIFACT_DIR, filename)
 
 
 def load_resource(filename: str) -> Any:

@@ -123,7 +123,8 @@ FEATURES: List[str] = [
 
 
 def _out_path(name: str) -> str:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.getenv("ARTIFACT_DIR") or os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, name)
 
 
